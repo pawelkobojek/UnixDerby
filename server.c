@@ -38,6 +38,10 @@ typedef struct {
 	int socket;
 } player_th_data;
 
+typedef struct {
+	char name[MAX_NAME_LEN];
+} horse;
+
 void usage(void) {
 	fprintf(stderr, "USAGE: server port\n");
 }
@@ -101,7 +105,7 @@ int register_player(player** players, int pl_len, char* name, int len) {
 		ERR("malloc");
 	}
 
-	/* Copy name without CL and LF characters*/
+	/* Copy name without CR and LF characters*/
 	memcpy(buf, name, (len - 2 < MAX_NAME_LEN) ? len - 2 : MAX_NAME_LEN);
 
 	players[empty_slot]->money = 0;
@@ -219,7 +223,7 @@ void* handle_connection(void* th_data) {
 	pthread_exit(NULL);
 }
 
-void* horse(void* horse) {
+void* horse_thread(void* horse) {
 	return NULL;
 }
 
@@ -306,9 +310,11 @@ void server_work(int socket) {
 	free(players);
 }
 
-void read_configuration() {
+void read_configuration(horse** horses, int* horse_count, int* frequency) {
 	FILE* file;
 	char buf[LINE_BUF];
+	int i;
+	char* b;
 	
 	memset(buf, 0, LINE_BUF);
 
@@ -316,18 +322,43 @@ void read_configuration() {
 		ERR("fopen");
 	}
 
-	while(fgets(buf, LINE_BUF, file) != NULL) {
-		fprintf(stderr, buf, LINE_BUF);
+	/* Read frequency */
+	if(fgets(buf, LINE_BUF, file) == NULL) {
+		goto closed;
 	}
 
+	*frequency = atoi(buf + strlen("FREQUENCY:"));
+
+	/* Read horse count */
+	if(fgets(buf, LINE_BUF, file) == NULL) {
+		goto closed;
+	}
+
+	*horse_count = atoi(buf + strlen("HORSE_COUNT:"));
+
+	if( (*horses = (horse*) calloc(*horse_count, sizeof(horse))) == NULL) {
+		fclose(file);
+		ERR("calloc");
+	}
+	
+	for(i = 0; i < *horse_count; ++i) {
+		if(fgets(buf, LINE_BUF, file) == NULL) {
+			goto closed;
+		}
+		b = strchr(buf, ' ') + 1;
+		strncpy((*horses)[i].name, b, MAX_NAME_LEN);
+		(*horses)[i].name[strlen(b) - 1] = '\0';
+	}
+closed:
 	if(fclose(file) == EOF) {
 		ERR("fclose");
 	}
 }
 
 int main(int argc, char** argv) {
-	int socket;
+	int socket, i, horse_count, frequency;
 	uint16_t port;
+	horse* horses;
 
 	if(argc != 2) {
 		usage();
@@ -336,7 +367,11 @@ int main(int argc, char** argv) {
 
 	port = atoi(argv[1]);
 
-	read_configuration();
+	read_configuration(&horses, &horse_count, &frequency);
+
+	for(i = 0; i < horse_count; ++i) {
+		fprintf(stderr, "Horse#%d: %s\n", i, horses[i].name);
+	}
 
 	if(sethandler(SIG_IGN, SIGPIPE) < 0) {
 		ERR("sigaction");
