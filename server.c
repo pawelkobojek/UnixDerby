@@ -16,7 +16,7 @@
 #define BUF_SIZE 32
 #define MAX_NAME_LEN 16
 #define LINE_BUF 256
-#define MAX_HORSES 8
+#define MAX_HORSES_PER_RACE 8
 
 #define SERVER_CONF_FILE "conf"
 
@@ -46,6 +46,20 @@ typedef struct {
 	char name[MAX_NAME_LEN];	/* Name of the horse */
 	short running;			/* Tells wheter horse is running (==1 if so)  or not (==0) */
 } horse;
+
+typedef struct {
+	int socket;
+	horse* horses;
+	int horse_count;
+} acc_clients_args;
+
+typedef struct {
+	horse* horses;
+	int horse_count;
+	pthread_mutex_t* mutex;
+	pthread_cond_t* cond;
+	pthread_barrier_t* barrier;
+} race_args;
 
 void usage(void) {
 	fprintf(stderr, "USAGE: server port\n");
@@ -137,7 +151,6 @@ void withdraw(int socket, player* pl, int amount) {
 	}
 
 	pl->money -= amount;
-
 }
 
 int get_value(char* buf) {
@@ -228,21 +241,6 @@ void* handle_connection(void* th_data) {
 	pthread_exit(NULL);
 }
 
-void* horse_thread(void* horse_data) {
-	horse* data = (horse*) horse_data;
-
-	while(!data->running) {
-		pthread_cond_wait(data->cond, data->mutex);
-		fprintf(stderr, "Horse: %s awaken!\n", data->name);
-	}
-
-	fprintf(stderr, "Horse: %s waiting on barrier...\n", data->name);
-	pthread_barrier_wait(data->barrier);
-	fprintf(stderr, "Horse: %s done!\n", data->name);
-	
-	pthread_exit(NULL);
-}
-
 int make_socket(uint16_t port) {
 	struct sockaddr_in name;
 	int sock, t = 1;
@@ -296,37 +294,46 @@ void read_from_client(int socket, fd_set* active_fds) {
 	}
 }
 
-void server_work(int socket, horse* horses, int horse_count) {
-	int sock, i=0;
-	pthread_t id[MAX_HORSES];
+void* horse_thread(void* horse_data) {
+	horse* data = (horse*) horse_data;
+	fprintf(stderr, "Horse: %s, running: %d\n", data->name, data->running);
+
+	while(1) {
+		pthread_mutex_lock(data->mutex);
+		while(!data->running) {
+			pthread_cond_wait(data->cond, data->mutex);
+			fprintf(stderr, "Horse: %s awaken!\n", data->name);
+		}
+		pthread_mutex_unlock(data->mutex);
+		
+		while(data->running) {
+			fprintf(stderr, "Horse: %s waiting on barrier...\n", data->name);
+			pthread_barrier_wait(data->barrier);
+			fprintf(stderr, "Horse: %s done!\n", data->name);
+
+			pthread_cond_wait(data->cond, data->mutex);
+			pthread_mutex_unlock(data->mutex);
+		}
+	}
+	pthread_exit(NULL);
+}
+
+void* server_accept_connections(void* arg) {
+	acc_clients_args* args = (acc_clients_args*) arg;
+	int sock, i=0, socket = args->socket, horse_count = args->horse_count;
+	horse* horses = args->horses;
+	pthread_t id[MAX_HORSES_PER_RACE];
 	pthread_attr_t thattr;
-	pthread_mutex_t race_mutex;
-	pthread_cond_t race_cond;
-	pthread_barrier_t race_barrier;
 	player** players;
 	player_th_data* thread_data;
 
 	pthread_attr_init(&thattr);
 	pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED);
 
-	pthread_mutex_init(&race_mutex, NULL);
-	pthread_cond_init(&race_cond, NULL);
-
+	printf("socket: %d\n", socket);
 	if( (players = (player**) malloc(2 * sizeof(player*))) == NULL) {
 		ERR("malloc");
 	}
-
-	for(i = 0; i < horse_count; ++i) {
-		horses[i].mutex = &race_mutex;
-		horses[i].cond = &race_cond;
-		horses[i].barrier = &race_barrier;
-		horses[i].running = 1;
-		pthread_create(&horses[i].tid, &thattr, horse_thread, (void*) &horses[i]);
-	}
-
-	pthread_barrier_init(&race_barrier, NULL, horse_count);
-
-	pthread_cond_broadcast(&race_cond);
 
 	while(1) {
 		fprintf(stderr, "Waiting for connection...\n");
@@ -348,16 +355,19 @@ void server_work(int socket, horse* horses, int horse_count) {
 	free(players);
 
 	pthread_attr_destroy(&thattr);
-	pthread_mutex_destroy(&race_mutex);
-	pthread_cond_destroy(&race_cond);
-	pthread_barrier_destroy(&race_barrier);
+	
+	pthread_exit(NULL);
 }
 
-void read_configuration(horse** horses, int* horse_count, int* frequency) {
+void read_configuration(horse** horses, int* horse_count, int* frequency, pthread_mutex_t* race_mutex, pthread_cond_t* race_cond, pthread_barrier_t* race_barrier) {
 	FILE* file;
 	char buf[LINE_BUF];
 	int i;
 	char* b;
+	pthread_attr_t thattr;
+
+	pthread_attr_init(&thattr);
+	pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED);
 	
 	memset(buf, 0, LINE_BUF);
 
@@ -392,41 +402,102 @@ void read_configuration(horse** horses, int* horse_count, int* frequency) {
 		strncpy((*horses)[i].name, b, MAX_NAME_LEN);
 		(*horses)[i].name[strlen(b) - 1] = '\0';
 		(*horses)[i].running = 0;
+		(*horses)[i].mutex = race_mutex;
+		(*horses)[i].cond = race_cond;
+		(*horses)[i].barrier = race_barrier;
+	
+		pthread_create(&(*horses)[i].tid, &thattr, horse_thread, (void*) &(*horses)[i]);
 	}
+
 closed:
 	if(fclose(file) == EOF) {
 		ERR("fclose");
 	}
+
+	pthread_attr_destroy(&thattr);
+}
+
+void* server_handle_race(void* arg) {
+	race_args* args = (race_args*) arg;
+	int horse_count = args->horse_count, i, racing_horses, count = 0, index;
+	unsigned int seed = time(NULL);
+	horse* horses = args->horses;
+	pthread_mutex_t* mutex = args->mutex;
+	pthread_cond_t* cond = args->cond;
+	pthread_barrier_t* barrier = args->barrier;
+
+		racing_horses = (MAX_HORSES_PER_RACE > horse_count) ? horse_count : MAX_HORSES_PER_RACE;
+
+		for(i = 0; i < racing_horses; ++i) {
+			index = rand_r(&seed) % racing_horses;
+			if(horses[index].running == 0) {
+				horses[index].running = 1;
+				++count;
+			}
+		}
+
+		pthread_barrier_destroy(barrier);
+		pthread_barrier_init(barrier, NULL, count);
+		
+	while(1) {
+		sleep(1);
+		pthread_cond_broadcast(cond);
+	}
+	pthread_exit(NULL);
 }
 
 int main(int argc, char** argv) {
-	int socket, i, horse_count, frequency;
+	int socket, horse_count, frequency;
 	uint16_t port;
 	horse* horses;
+	pthread_t tid[2];
+	pthread_mutex_t race_mutex;
+	pthread_cond_t race_cond;
+	pthread_barrier_t race_barrier;
+	acc_clients_args arguments1;
+	race_args race_args;
 
 	if(argc != 2) {
 		usage();
 		exit(EXIT_FAILURE);
 	}
 
-	port = atoi(argv[1]);
-
-	read_configuration(&horses, &horse_count, &frequency);
-
-	for(i = 0; i < horse_count; ++i) {
-		fprintf(stderr, "Horse#%d: %s\n", i, horses[i].name);
-	}
-
 	if(sethandler(SIG_IGN, SIGPIPE) < 0) {
 		ERR("sigaction");
 	}
 
+	pthread_mutex_init(&race_mutex, NULL);
+	pthread_cond_init(&race_cond, NULL);
+	pthread_barrier_init(&race_barrier, NULL, 3);
+
+	port = atoi(argv[1]);
+
+	read_configuration(&horses, &horse_count, &frequency, &race_mutex, &race_cond, &race_barrier);
+
 	socket = make_socket(port);
-	server_work(socket, horses, horse_count);
 	
+	arguments1.socket = socket;
+	arguments1.horses = horses;
+	arguments1.horse_count = horse_count;
+	
+	pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1);
+
+	race_args.horses = horses;
+	race_args.horse_count = horse_count;
+	race_args.mutex = &race_mutex;
+	race_args.cond = &race_cond;
+	race_args.barrier = &race_barrier;
+	pthread_create(&tid[1], NULL, server_handle_race, (void*) &race_args);
+	
+	pthread_join(tid[0], NULL);	
+	pthread_join(tid[1], NULL);
+
 	if(TEMP_FAILURE_RETRY(close(socket)) < 0) {
 		ERR("close");
 	}
+
+	pthread_mutex_destroy(&race_mutex);
+	pthread_cond_destroy(&race_cond);
 
 	return EXIT_SUCCESS;
 }
