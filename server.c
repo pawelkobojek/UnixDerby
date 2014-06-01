@@ -40,14 +40,6 @@ typedef struct {
 } player;
 
 typedef struct {
-	player** players;
-	int socket;
-	int* state;
-	pthread_mutex_t* state_mutex;
-	pthread_cond_t* state_cond;
-} player_th_data;
-
-typedef struct {
 	pthread_t tid;			/* Horse thread's id */
 	pthread_mutex_t* mutex;		/* Pointer to mutex uesd to simulate race turns */
 	pthread_cond_t* cond;		/* Pointer to conditional variable used to simulate race turns */
@@ -64,12 +56,26 @@ typedef struct {
 } horse_args;
 
 typedef struct {
+	player** players;
+	int socket;
+	int* state;
+	int horse_count;
+	horse* horses;
+	pthread_mutex_t* state_mutex;
+	pthread_mutex_t* mutex;
+	pthread_cond_t* state_cond;
+	pthread_cond_t* cond;
+} player_th_data;
+
+typedef struct {
 	int socket;
 	horse* horses;
 	int horse_count;
 	int* state;
 	pthread_cond_t* state_cond;
+	pthread_cond_t* cond;
 	pthread_mutex_t* state_mutex;
+	pthread_mutex_t* mutex;
 } acc_clients_args;
 
 typedef struct {
@@ -193,8 +199,10 @@ int get_value(char* buf) {
 */
 void* handle_connection(void* th_data) {
 	player_th_data* data = (player_th_data*) th_data;
-	int socket = data->socket, count, index;
+	int socket = data->socket, count, index, i;
 	char buf[BUF_SIZE];
+	char race_status[256 * 8];
+	char one_line_status[256];
 	player** players = data->players;
 
 	memset(buf, 0, BUF_SIZE);
@@ -214,12 +222,37 @@ void* handle_connection(void* th_data) {
 
 	index = register_player(players, 3,  buf, strlen(buf));
 
+	while(*data->state != STATE_NOT_RACING) {
+		pthread_cond_wait(data->cond, data->mutex);
+		pthread_mutex_unlock(data->mutex);
+		for(i = 0; i < data->horse_count; ++i) {
+			if(data->horses[i].running) {
+				snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run);
+				strcat(race_status, one_line_status);
+			}
+		}
+		strcat(race_status, "\n");
+		if(bulk_write(socket, race_status, 256*8) < 0) {
+			ERR("write");
+		}
+		race_status[0]='\0';
+	}
 	while( (count = read(socket, buf, BUF_SIZE)) ) {
 
 		while(*data->state != STATE_NOT_RACING) {
-			fprintf(stderr, "State not racing\n");
-			pthread_cond_wait(data->state_cond, data->state_mutex);
-			pthread_mutex_unlock(data->state_mutex);
+			pthread_cond_wait(data->cond, data->mutex);
+			pthread_mutex_unlock(data->mutex);
+			for(i = 0; i < data->horse_count; ++i) {
+				if(data->horses[i].running) {
+					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run);
+					strcat(race_status, one_line_status);
+				}
+			}
+			strcat(race_status, "\n");
+			if(bulk_write(socket, race_status, 256*8) < 0) {
+				ERR("write");
+			}
+			race_status[0]='\0';
 		}
 	
 		fprintf(stderr, "State racing\n");
@@ -331,7 +364,8 @@ void* horse_thread(void* arg) {
 	horse* data = args->horse_data;
 	float distance;
 	fprintf(stderr, "Horse: %s, running: %d\n", data->name, data->running);
-
+	
+	while(!exit_flag) {
 		pthread_mutex_lock(data->mutex);
 		while(!data->running) {
 			pthread_cond_wait(data->cond, data->mutex);
@@ -349,6 +383,7 @@ void* horse_thread(void* arg) {
 				pthread_mutex_lock(data->mutex);
 				if(!(*args->winner)) {
 					*args->winner = data;
+					fprintf(stderr, "Horse: %s ended\n", data->name);
 				}
 				pthread_mutex_unlock(data->mutex);
 			}
@@ -358,8 +393,7 @@ void* horse_thread(void* arg) {
 			pthread_cond_wait(data->cond, data->mutex);
 			pthread_mutex_unlock(data->mutex);
 		}
-	
-	fprintf(stderr, "Horse: %s ended\n", data->name);
+	}
 	pthread_exit(NULL);
 }
 
@@ -393,7 +427,11 @@ void* server_accept_connections(void* arg) {
 		thread_data->players = players;
 		thread_data->state_mutex = args->state_mutex;
 		thread_data->state_cond = args->state_cond;
+		thread_data->cond = args->cond;
+		thread_data->mutex = args->mutex;
 		thread_data->state = args->state;
+		thread_data->horse_count = args->horse_count;
+		thread_data->horses = args->horses;
 		pthread_create(&id[i++], &thattr, handle_connection, (void*) thread_data);
 	}
 
@@ -510,6 +548,11 @@ void* server_handle_race(void* arg) {
 			sleep(1);
 			pthread_cond_broadcast(cond);
 		}
+
+		for(i = 0; i < horse_count; ++i) {
+			horses[index].running = 0;
+		}
+		pthread_cond_broadcast(cond);
 		
 		*args->state = STATE_NOT_RACING;
 		pthread_cond_signal(args->state_cond);
@@ -560,7 +603,8 @@ int main(int argc, char** argv) {
 	arguments1.state_mutex = &state_mutex;
 	arguments1.state_cond = &state_cond;
 	arguments1.state = &state_value;
-	
+	arguments1.cond = &race_cond;
+	arguments1.mutex = &race_mutex;
 	pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1);
 
 	race_arg.horses = horses;
