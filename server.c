@@ -18,6 +18,7 @@
 #define LINE_BUF 256
 #define MAX_HORSES_PER_RACE 8
 #define MAX_HORSE_SPEED 14
+#define RACE_DISTANCE 100
 
 #define STATE_NOT_RACING 101
 #define STATE_RACING 102
@@ -384,7 +385,7 @@ void* horse_thread(void* arg) {
 			data->distance_run += distance;
 			data->rest_factor -= distance * 0.001;
 
-			if(data->distance_run >= 100) {
+			if(data->distance_run >= RACE_DISTANCE) {
 				data->running = 0;
 				pthread_mutex_lock(data->mutex);
 				if(!(*args->winner)) {
@@ -394,7 +395,7 @@ void* horse_thread(void* arg) {
 				pthread_mutex_unlock(data->mutex);
 			}
 
-			fprintf(stderr, "Horse: %s\tDistance run: %d, Rest Factor: %f\n",data->name, data->distance_run, data->rest_factor);
+			fprintf(stderr, "Horse: %s\tDistance run: %d, Rest Factor: %f\n", data->name, data->distance_run, data->rest_factor);
 
 			pthread_cond_wait(data->cond, data->mutex);
 			pthread_mutex_unlock(data->mutex);
