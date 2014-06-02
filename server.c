@@ -65,6 +65,7 @@ typedef struct {
 	pthread_mutex_t* mutex;
 	pthread_cond_t* state_cond;
 	pthread_cond_t* cond;
+	horse*** curr_running_horses;
 } player_th_data;
 
 typedef struct {
@@ -76,6 +77,7 @@ typedef struct {
 	pthread_cond_t* cond;
 	pthread_mutex_t* state_mutex;
 	pthread_mutex_t* mutex;
+	horse*** curr_running_horses;
 } acc_clients_args;
 
 typedef struct {
@@ -88,6 +90,7 @@ typedef struct {
 	pthread_mutex_t* mutex;
 	pthread_cond_t* cond;
 	pthread_barrier_t* barrier;
+	horse*** curr_running_horses;
 } race_args;
 
 void usage(void) {
@@ -204,6 +207,7 @@ void* handle_connection(void* th_data) {
 	char race_status[256 * 8];
 	char one_line_status[256];
 	player** players = data->players;
+	/* int a, b, c, d, e, f, g, h, j, k, l, m, n, o, p, q, r, s, t, v, w, x, y, z, aa, bb, cc, dd, ee, ff, gg, hh, ii, jj, kk, ll, mm, nn, oo, pp, qq, rr, ss, tt, uu, vv, ww, xx, yy, zz, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al, am, an, ao, ap, aq, ar, as, at, au, av, aw, ax, ay, az, ba, bc, bd, be, bf, bg, bh, bi, bj, bk, bl, bm, bn, bo, bp, bq, br, bs, bt, bu, bv, bw, bx, by, bz, ca, cb, cd, ce, cf, cg, ch, ci, cj, ck, cl, cm, cn, co, cp, cq, cr, cs, ct, cu, cv, cw, cx, cy, cz, da, db, dc, de, df, dg, dh, di, dj, dk, dl, dm, dn, d0, dp, dq, dr, ds, dt, du, dv, dw, dx, dy, dz, ea, eb, ec, ed, ef, eg, eh, ei, ej, ek, el,em, en, eo, ep, eq, er, es, et, ev, ew, ex, ey, ez, fa, fb, fc, fd, fe, fg, fh, fi, fj, fk, fl, fm, fn, fo, fp, fq, fr, fs, ft, fu, fv, fw, fx, fy, fz, ga, gb, gc, gd, ge, gf, gh, gi, gj, gk, gl, gm, gn, go, gp, gq, gr, gs, gt, gu, gv, gw, gx, gy, gz, ha, hb, hc, hd, he, hf, hg, hi, hj, hk, hl, hm, hn, ho, hp, hq, hr, hs, ht, hu, hv, hw, hx, hy, hz, ia, ib, ic, id, ie, ig, ih, ij, ik, il, im, in, io, ip. iq. ir. is. it. iu, iv. iw, iu, ix, iy, iz; */
 
 	memset(buf, 0, BUF_SIZE);
 
@@ -226,8 +230,9 @@ void* handle_connection(void* th_data) {
 		pthread_cond_wait(data->cond, data->mutex);
 		pthread_mutex_unlock(data->mutex);
 		for(i = 0; i < data->horse_count; ++i) {
-			if(data->horses[i].running) {
-				snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run);
+			if((*data->curr_running_horses)[i]) {
+				snprintf(one_line_status, 256, "%s dinstance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
+/*				snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
 				strcat(race_status, one_line_status);
 			}
 		}
@@ -242,9 +247,10 @@ void* handle_connection(void* th_data) {
 		while(*data->state != STATE_NOT_RACING) {
 			pthread_cond_wait(data->cond, data->mutex);
 			pthread_mutex_unlock(data->mutex);
-			for(i = 0; i < data->horse_count; ++i) {
-				if(data->horses[i].running) {
-					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run);
+			for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
+				if(*(data->curr_running_horses)[i]) {
+					snprintf(one_line_status, 256, "%s dinstance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
+/*					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
 					strcat(race_status, one_line_status);
 				}
 			}
@@ -399,8 +405,8 @@ void* horse_thread(void* arg) {
 
 void* server_accept_connections(void* arg) {
 	acc_clients_args* args = (acc_clients_args*) arg;
-	int sock, i=0, socket = args->socket, horse_count = args->horse_count;
-	horse* horses = args->horses;
+	int sock, i=0, socket = args->socket/*, horse_count = args->horse_count*/;
+	/*horse* horses = args->horses;*/
 	pthread_t id[MAX_HORSES_PER_RACE];
 	pthread_attr_t thattr;
 	player** players;
@@ -432,6 +438,7 @@ void* server_accept_connections(void* arg) {
 		thread_data->state = args->state;
 		thread_data->horse_count = args->horse_count;
 		thread_data->horses = args->horses;
+		thread_data->curr_running_horses = args->curr_running_horses;
 		pthread_create(&id[i++], &thattr, handle_connection, (void*) thread_data);
 	}
 
@@ -517,10 +524,10 @@ closed:
 
 void* server_handle_race(void* arg) {
 	race_args* args = (race_args*) arg;
-	int horse_count = args->horse_count, i, racing_horses, count = 0, index;
+	int horse_count = args->horse_count, i, racing_horses, count = 0, index, in_running_index=0;
 	unsigned int seed = time(NULL);
 	horse* horses = args->horses;
-	pthread_mutex_t* mutex = args->mutex;
+	/*pthread_mutex_t* mutex = args->mutex;(*/
 	pthread_cond_t* cond = args->cond;
 	pthread_barrier_t* barrier = args->barrier;
 	
@@ -537,6 +544,7 @@ void* server_handle_race(void* arg) {
 			index = rand_r(&seed) % racing_horses;
 			if(horses[index].running == 0) {
 				horses[index].running = 1;
+				(*args->curr_running_horses)[in_running_index++] = &horses[index];
 				++count;
 			}
 		}
@@ -552,6 +560,11 @@ void* server_handle_race(void* arg) {
 		for(i = 0; i < horse_count; ++i) {
 			horses[index].running = 0;
 		}
+
+		for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
+			*(args->curr_running_horses)[i] = NULL;
+		}
+
 		pthread_cond_broadcast(cond);
 		
 		*args->state = STATE_NOT_RACING;
@@ -563,10 +576,11 @@ void* server_handle_race(void* arg) {
 }
 
 int main(int argc, char** argv) {
-	int socket, horse_count, frequency, state_value = STATE_RACING;
+	int socket, horse_count, frequency, state_value = STATE_RACING, i;
 	uint16_t port;
 	horse* horses;
 	horse* race_winner;
+	horse** curr_running;
 	pthread_t tid[2];
 	pthread_mutex_t race_mutex, state_mutex;
 	pthread_cond_t race_cond, state_cond;
@@ -581,6 +595,13 @@ int main(int argc, char** argv) {
 
 	if(sethandler(SIG_IGN, SIGPIPE) < 0) {
 		ERR("sigaction");
+	}
+
+	if( (curr_running = (horse**) calloc(MAX_HORSES_PER_RACE, sizeof(horse*))) == NULL ) {
+		ERR("calloc");
+	}
+	for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
+		curr_running[i] = NULL;
 	}
 
 	pthread_mutex_init(&race_mutex, NULL);
@@ -605,6 +626,7 @@ int main(int argc, char** argv) {
 	arguments1.state = &state_value;
 	arguments1.cond = &race_cond;
 	arguments1.mutex = &race_mutex;
+	arguments1.curr_running_horses = &curr_running;
 	pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1);
 
 	race_arg.horses = horses;
@@ -616,10 +638,18 @@ int main(int argc, char** argv) {
 	race_arg.cond = &race_cond;
 	race_arg.barrier = &race_barrier;
 	race_arg.state = &state_value;
-	pthread_create(&tid[1], NULL, server_handle_race, (void*) &race_arg);
+	race_arg.curr_running_horses = &curr_running;
+	if( pthread_create(&tid[1], NULL, server_handle_race, (void*) &race_arg) != 0) {
+		ERR("pthread_create");
+	}
 	
-	pthread_join(tid[0], NULL);	
-	pthread_join(tid[1], NULL);
+	if(pthread_join(tid[0], NULL) != 0) {
+		ERR("pthread_join");
+	}
+	
+	if(pthread_join(tid[1], NULL) != 0) {
+		ERR("pthread_join");
+	}
 
 	if(TEMP_FAILURE_RETRY(close(socket)) < 0) {
 		ERR("close");
