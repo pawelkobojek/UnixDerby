@@ -540,6 +540,8 @@ void* server_handle_race(void* arg) {
 		
 		racing_horses = (MAX_HORSES_PER_RACE > horse_count) ? horse_count : MAX_HORSES_PER_RACE;
 
+		count = 0;
+		in_running_index = 0;
 		for(i = 0; i < racing_horses; ++i) {
 			index = rand_r(&seed) % racing_horses;
 			if(horses[index].running == 0) {
@@ -562,7 +564,7 @@ void* server_handle_race(void* arg) {
 		}
 
 		for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
-			*(args->curr_running_horses)[i] = NULL;
+			(*args->curr_running_horses)[i] = NULL;
 		}
 
 		pthread_cond_broadcast(cond);
