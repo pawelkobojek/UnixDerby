@@ -228,8 +228,12 @@ void* handle_connection(void* th_data) {
 	index = register_player(players, 3,  buf, strlen(buf));
 
 	while(*data->state != STATE_NOT_RACING) {
-		pthread_cond_wait(data->cond, data->mutex);
-		pthread_mutex_unlock(data->mutex);
+		if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+			ERR("pthread_mutex_unlock");
+		}
+		if(pthread_mutex_unlock(data->mutex) != 0) {
+			ERR("pthread_mutex_unlock");
+		}
 		for(i = 0; i < data->horse_count; ++i) {
 			if((*data->curr_running_horses)[i]) {
 				snprintf(one_line_status, 256, "%s dinstance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
@@ -244,10 +248,18 @@ void* handle_connection(void* th_data) {
 		race_status[0]='\0';
 	}
 	while( (count = read(socket, buf, BUF_SIZE)) ) {
+	
+		if(count < 0) {
+			ERR("read");
+		}
 
 		while(*data->state != STATE_NOT_RACING) {
-			pthread_cond_wait(data->cond, data->mutex);
-			pthread_mutex_unlock(data->mutex);
+			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+				ERR("pthread_cond_wait");
+			}
+			if(pthread_mutex_unlock(data->mutex) != 0) {
+				ERR("pthread_mutex_unlock");
+			}
 			for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
 				if(*(data->curr_running_horses)[i]) {
 					snprintf(one_line_status, 256, "%s dinstance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
@@ -260,12 +272,6 @@ void* handle_connection(void* th_data) {
 				ERR("write");
 			}
 			race_status[0]='\0';
-		}
-	
-		fprintf(stderr, "State racing\n");
-
-		if(count < 0) {
-			ERR("read");
 		}
 
 		fprintf(stderr, "Data: %s", buf);
@@ -373,12 +379,18 @@ void* horse_thread(void* arg) {
 	fprintf(stderr, "Horse: %s, running: %d\n", data->name, data->running);
 	
 	while(!exit_flag) {
-		pthread_mutex_lock(data->mutex);
+		if(pthread_mutex_lock(data->mutex) != 0) {
+			ERR("pthread_mutex_lock");
+		}
 		while(!data->running) {
-			pthread_cond_wait(data->cond, data->mutex);
+			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+				ERR("pthread_cond_wait");
+			}
 			fprintf(stderr, "Horse: %s awaken!\n", data->name);
 		}
-		pthread_mutex_unlock(data->mutex);
+		if(pthread_mutex_unlock(data->mutex) != 0) {
+			ERR("pthread_mutex_unlock");
+		}
 		
 		while(data->running) {
 			distance = data->rest_factor * MAX_HORSE_SPEED + (rand() % 5);
@@ -387,18 +399,26 @@ void* horse_thread(void* arg) {
 
 			if(data->distance_run >= RACE_DISTANCE) {
 				data->running = 0;
-				pthread_mutex_lock(data->mutex);
+				if(pthread_mutex_lock(data->mutex) != 0) {
+					ERR("pthread_mutex_lock");
+				}
 				if(!(*args->winner)) {
 					*args->winner = data;
 					fprintf(stderr, "Horse: %s ended\n", data->name);
 				}
-				pthread_mutex_unlock(data->mutex);
+				if(pthread_mutex_unlock(data->mutex) != 0) {
+					ERR("pthread_mutex_unlock");
+				}
 			}
 
 			fprintf(stderr, "Horse: %s\tDistance run: %d, Rest Factor: %f\n", data->name, data->distance_run, data->rest_factor);
 
-			pthread_cond_wait(data->cond, data->mutex);
-			pthread_mutex_unlock(data->mutex);
+			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+				ERR("pthread_cond_wait");
+			}
+			if(pthread_mutex_unlock(data->mutex) != 0) {
+				ERR("pthread_mutex_unlock");
+			}
 		}
 	}
 	pthread_exit(NULL);
@@ -413,8 +433,12 @@ void* server_accept_connections(void* arg) {
 	player** players;
 	player_th_data* thread_data;
 
-	pthread_attr_init(&thattr);
-	pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED);
+	if(pthread_attr_init(&thattr) != 0) {
+		ERR("pthread_attr_init");
+	}
+	if(pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED) != 0) {
+		ERR("pthread_attr_setdetachstate");
+	}
 
 	printf("socket: %d\n", socket);
 	if( (players = (player**) malloc(2 * sizeof(player*))) == NULL) {
@@ -440,7 +464,9 @@ void* server_accept_connections(void* arg) {
 		thread_data->horse_count = args->horse_count;
 		thread_data->horses = args->horses;
 		thread_data->curr_running_horses = args->curr_running_horses;
-		pthread_create(&id[i++], &thattr, handle_connection, (void*) thread_data);
+		if(pthread_create(&id[i++], &thattr, handle_connection, (void*) thread_data) != 0) {
+			ERR("pthread_create");
+		}
 	}
 
 	for(i = 0; i < 2; ++i) {
@@ -448,7 +474,9 @@ void* server_accept_connections(void* arg) {
 	}
 	free(players);
 
-	pthread_attr_destroy(&thattr);
+	if(pthread_attr_destroy(&thattr) != 0) {
+		ERR("pthread_attr_destroy");
+	}
 	
 	pthread_exit(NULL);
 }
@@ -461,8 +489,12 @@ void read_configuration(horse** horses, horse** race_winner, int* horse_count, i
 	pthread_attr_t thattr;
 	horse_args* hargs;
 
-	pthread_attr_init(&thattr);
-	pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED);
+	if(pthread_attr_init(&thattr) != 0) {
+		ERR("pthread_attr_init");
+	}
+	if(pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED) != 0) {
+		ERR("pthread_attr_setdetachstate");
+	}
 	
 	memset(buf, 0, LINE_BUF);
 
@@ -512,7 +544,9 @@ void read_configuration(horse** horses, horse** race_winner, int* horse_count, i
 		hargs[i].winner = race_winner;
 		hargs[i].horse_data = &(*horses)[i];
 	
-		pthread_create(&(*horses)[i].tid, &thattr, horse_thread, (void*) &hargs[i]);
+		if(pthread_create(&(*horses)[i].tid, &thattr, horse_thread, (void*) &hargs[i]) != 0) {
+			ERR("pthread_create");
+		}
 	}
 
 closed:
@@ -520,7 +554,9 @@ closed:
 		ERR("fclose");
 	}
 
-	pthread_attr_destroy(&thattr);
+	if(pthread_attr_destroy(&thattr) != 0) {
+		ERR("pthread_attr_destroy");
+	}
 }
 
 void* server_handle_race(void* arg) {
@@ -535,8 +571,12 @@ void* server_handle_race(void* arg) {
 	while(!exit_flag) {
 
 		while(*args->state != STATE_RACING) {
-			pthread_cond_wait(args->state_cond, args->state_mutex);
-			pthread_mutex_unlock(args->state_mutex);
+			if(pthread_cond_wait(args->state_cond, args->state_mutex) != 0) {
+				ERR("pthread_cond_wait");
+			}
+			if(pthread_mutex_unlock(args->state_mutex) != 0) {
+				ERR("pthread_mutex_unlock");
+			}
 		}
 		
 		racing_horses = (MAX_HORSES_PER_RACE > horse_count) ? horse_count : MAX_HORSES_PER_RACE;
@@ -552,12 +592,18 @@ void* server_handle_race(void* arg) {
 			}
 		}
 
-		pthread_barrier_destroy(barrier);
-		pthread_barrier_init(barrier, NULL, count);
+		if(pthread_barrier_destroy(barrier) != 0) {
+			ERR("pthread_barrier_destroy");
+		}
+		if(pthread_barrier_init(barrier, NULL, count) != 0) {
+			ERR("pthread_barrier_init");
+		}
 		
 		while(!(*(args->winner)) && !exit_flag) {
 			sleep(1);
-			pthread_cond_broadcast(cond);
+			if(pthread_cond_broadcast(cond) != 0) {
+				ERR("pthread_cond_broadcast");
+			}
 		}
 
 		for(i = 0; i < horse_count; ++i) {
@@ -568,7 +614,9 @@ void* server_handle_race(void* arg) {
 			(*args->curr_running_horses)[i] = NULL;
 		}
 
-		pthread_cond_broadcast(cond);
+		if(pthread_cond_broadcast(cond) != 0) {
+			ERR("pthread_cond_broadcast");
+		}
 		
 		*args->state = STATE_NOT_RACING;
 		pthread_cond_signal(args->state_cond);
@@ -607,11 +655,18 @@ int main(int argc, char** argv) {
 		curr_running[i] = NULL;
 	}
 
-	pthread_mutex_init(&race_mutex, NULL);
-	pthread_mutex_init(&state_mutex, NULL);
-	pthread_cond_init(&race_cond, NULL);
-	pthread_cond_init(&state_cond, NULL);
-	pthread_barrier_init(&race_barrier, NULL, 3);
+	if(pthread_mutex_init(&race_mutex, NULL) != 0) {
+		ERR("pthread_mutex_init");
+	}
+	if(pthread_mutex_init(&state_mutex, NULL) != 0) {
+		ERR("pthread_mutex_init");
+	}
+	if(pthread_cond_init(&race_cond, NULL) != 0) {
+		ERR("pthread_cond_init");
+	}
+	if(pthread_cond_init(&state_cond, NULL) != 0) {
+		ERR("pthread_cond_init");
+	}
 
 	port = atoi(argv[1]);
 
@@ -630,7 +685,9 @@ int main(int argc, char** argv) {
 	arguments1.cond = &race_cond;
 	arguments1.mutex = &race_mutex;
 	arguments1.curr_running_horses = &curr_running;
-	pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1);
+	if(pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1) != 0) {
+		ERR("pthread_create");
+	}
 
 	race_arg.horses = horses;
 	race_arg.winner = &race_winner;
@@ -658,10 +715,18 @@ int main(int argc, char** argv) {
 		ERR("close");
 	}
 
-	pthread_mutex_destroy(&race_mutex);
-	pthread_mutex_destroy(&state_mutex);
-	pthread_cond_destroy(&race_cond);
-	pthread_cond_destroy(&state_cond);
+	if(pthread_mutex_destroy(&race_mutex) != 0) {
+		ERR("pthread_mutex_destroy");
+	}
+	if(pthread_mutex_destroy(&state_mutex) != 0) {
+		ERR("pthread_mutex_destroy");
+	}
+	if(pthread_cond_destroy(&race_cond) != 0) {
+		ERR("pthread_cond_destroy");
+	}
+	if(pthread_cond_destroy(&state_cond) != 0) {
+		ERR("pthread_cond_destroy");
+	}
 
 	return EXIT_SUCCESS;
 }
