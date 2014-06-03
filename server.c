@@ -6,11 +6,13 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <pthread.h>
 #include <limits.h>
+#include <time.h>
 
 #define BACKLOG 5
 #define BUF_SIZE 32
@@ -19,6 +21,7 @@
 #define MAX_HORSES_PER_RACE 8
 #define MAX_HORSE_SPEED 14
 #define RACE_DISTANCE 100
+#define MAX_PLAYERS 8
 
 #define STATE_NOT_RACING 101
 #define STATE_RACING 102
@@ -52,6 +55,8 @@ typedef struct {
 	int money;
 	horse* horse_bet;
 	int money_bet;
+	int* bank;
+	pthread_mutex_t* bank_mutex;
 } player;
 
 typedef struct {
@@ -63,10 +68,12 @@ typedef struct {
 	player** players;
 	int socket;
 	int* state;
+	int* bank;
 	int horse_count;
 	horse* horses;
 	pthread_mutex_t* state_mutex;
 	pthread_mutex_t* mutex;
+	pthread_mutex_t* bank_mutex;
 	pthread_cond_t* state_cond;
 	pthread_cond_t* cond;
 	horse*** curr_running_horses;
@@ -78,21 +85,27 @@ typedef struct {
 	horse* horses;
 	int horse_count;
 	int* state;
+	int* bank;
+	player** players;
 	horse** winner;
 	pthread_cond_t* state_cond;
 	pthread_cond_t* cond;
 	pthread_mutex_t* state_mutex;
 	pthread_mutex_t* mutex;
+	pthread_mutex_t* bank_mutex;
 	horse*** curr_running_horses;
 } acc_clients_args;
 
 typedef struct {
 	horse* horses;
 	horse** winner;
+	player** players;
 	int horse_count;
 	int* state;
+	int* bank;
 	pthread_mutex_t* state_mutex;
 	pthread_cond_t* state_cond;
+	pthread_mutex_t* bank_mutex;
 	pthread_mutex_t* mutex;
 	pthread_cond_t* cond;
 	horse*** curr_running_horses;
@@ -190,7 +203,7 @@ void withdraw(int socket, player* pl, int amount) {
 	pl->money -= amount;
 }
 
-void bet(int socket, player* pl, char* cmd, horse* horses, int horse_count) {
+void bet(int socket, player* pl, char* cmd, horse* horses, int horse_count, int* bank, pthread_mutex_t* bank_mutex) {
 	int i, money_bet;
 	char* second, *third, *save_ptr;
 	printf("cmd: %s\n", cmd);
@@ -215,6 +228,9 @@ void bet(int socket, player* pl, char* cmd, horse* horses, int horse_count) {
 					pl->horse_bet = &horses[i];
 					pl->money_bet = money_bet;
 					pl->money -= money_bet;
+					pthread_mutex_lock(bank_mutex);
+					*bank += money_bet;
+					pthread_mutex_unlock(bank_mutex);
 					return;
 				}
 			}
@@ -251,12 +267,13 @@ int get_value(char* buf) {
 */
 void* handle_connection(void* th_data) {
 	player_th_data* data = (player_th_data*) th_data;
-	int socket = data->socket, count, index, i;
+	int socket = data->socket, count, index, i, result;
 	char buf[BUF_SIZE];
 	char race_status[256 * 8];
 	char one_line_status[256];
 	player** players = data->players;
-	/* int a, b, c, d, e, f, g, h, j, k, l, m, n, o, p, q, r, s, t, v, w, x, y, z, aa, bb, cc, dd, ee, ff, gg, hh, ii, jj, kk, ll, mm, nn, oo, pp, qq, rr, ss, tt, uu, vv, ww, xx, yy, zz, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al, am, an, ao, ap, aq, ar, as, at, au, av, aw, ax, ay, az, ba, bc, bd, be, bf, bg, bh, bi, bj, bk, bl, bm, bn, bo, bp, bq, br, bs, bt, bu, bv, bw, bx, by, bz, ca, cb, cd, ce, cf, cg, ch, ci, cj, ck, cl, cm, cn, co, cp, cq, cr, cs, ct, cu, cv, cw, cx, cy, cz, da, db, dc, de, df, dg, dh, di, dj, dk, dl, dm, dn, d0, dp, dq, dr, ds, dt, du, dv, dw, dx, dy, dz, ea, eb, ec, ed, ef, eg, eh, ei, ej, ek, el,em, en, eo, ep, eq, er, es, et, ev, ew, ex, ey, ez, fa, fb, fc, fd, fe, fg, fh, fi, fj, fk, fl, fm, fn, fo, fp, fq, fr, fs, ft, fu, fv, fw, fx, fy, fz, ga, gb, gc, gd, ge, gf, gh, gi, gj, gk, gl, gm, gn, go, gp, gq, gr, gs, gt, gu, gv, gw, gx, gy, gz, ha, hb, hc, hd, he, hf, hg, hi, hj, hk, hl, hm, hn, ho, hp, hq, hr, hs, ht, hu, hv, hw, hx, hy, hz, ia, ib, ic, id, ie, ig, ih, ij, ik, il, im, in, io, ip. iq. ir. is. it. iu, iv. iw, iu, ix, iy, iz; */
+	fd_set read_set;
+	struct timeval tv, ttv = {0, 100};
 
 	memset(buf, 0, BUF_SIZE);
 
@@ -276,6 +293,7 @@ void* handle_connection(void* th_data) {
 	index = register_player(players, 3,  buf, strlen(buf));
 
 	while(*data->state != STATE_NOT_RACING) {
+		pthread_mutex_lock(data->mutex);
 		if(pthread_cond_wait(data->cond, data->mutex) != 0) {
 			ERR("pthread_mutex_unlock");
 		}
@@ -296,73 +314,85 @@ void* handle_connection(void* th_data) {
 		race_status[0]='\0';
 	}
 
-	printf("yup\n");
-	if(players[index]->horse_bet && data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
+	if(players[index]->horse_bet && *data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
 		players[index]->money += players[index]->money_bet * 2;
 	}
-	printf("nop\n");
-	while( (count = read(socket, buf, BUF_SIZE)) ) {
-	
-		if(count < 0) {
-			ERR("read");
-		}
 
-		while(*data->state != STATE_NOT_RACING) {
-			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
-				ERR("pthread_cond_wait");
+	FD_ZERO(&read_set);
+	FD_SET(socket, &read_set);
+	count = 1;
+	tv = ttv;
+	while( count || (result = select(socket + 1, &read_set, NULL, NULL, &tv))) {
+		if(result < 0 && errno != EINTR) {
+			ERR("select");
+		}
+		tv = ttv;
+		printf("About to check FD_ISSET...\n");
+		if(FD_ISSET(socket, &read_set)) {
+			printf("Reading\n");
+			count = read(socket, buf, BUF_SIZE);
+			
+			if(count < 0) {
+				ERR("read");
 			}
-			if(pthread_mutex_unlock(data->mutex) != 0) {
-				ERR("pthread_mutex_unlock");
-			}
-			for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
-				if(*(data->curr_running_horses)[i]) {
-					snprintf(one_line_status, 256, "%s dinstance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
-/*					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
-					strcat(race_status, one_line_status);
+
+			while(*data->state != STATE_NOT_RACING) {
+				pthread_mutex_lock(data->mutex);
+				if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+					ERR("pthread_cond_wait");
 				}
-			}
-			strcat(race_status, "\n");
-			if(bulk_write(socket, race_status, 256*8) < 0) {
-				ERR("write");
-			}
-			race_status[0]='\0';
-		}
-		if(players[index]->horse_bet && data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
-			players[index]->money += players[index]->money_bet * 2;
-			printf("SSSS\n");
-		}
-		fprintf(stderr, "Data: %s", buf);
-
-		switch(buf[0]) {
-			case 'd':
-				/* deposit */
-				deposit(socket, players[index], get_value(buf));
-				break;
-			case 'w':
-				/* withdraw */
-				withdraw(socket, players[index], get_value(buf));
-				break;
-			case 'i':
-				/* info */
-				print_info(socket, players[index]);
-			case 'n':
-				/* next */
-				break;
-			case 'l':
-				/* last */
-				break;
-			case 'b':
-				/* bet */
-				bet(socket, players[index], buf, data->horses, data->horse_count);
-				break;
-			default:
-				if(bulk_write(socket, UNWN_CMD_MSG, strlen(UNWN_CMD_MSG)) < 0) {
+				if(pthread_mutex_unlock(data->mutex) != 0) {
+					ERR("pthread_mutex_unlock");
+				}
+				for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
+					if((*data->curr_running_horses)[i]) {
+						snprintf(one_line_status, 256, "%s distance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
+	/*					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
+						strcat(race_status, one_line_status);
+					}
+				}
+				strcat(race_status, "\n");
+				if(bulk_write(socket, race_status, 256*8) < 0) {
 					ERR("write");
 				}
-				break;
-		}		
+				race_status[0]='\0';
+			}
+			if(players[index]->horse_bet && *data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
+				players[index]->money += players[index]->money_bet * 2;
+				printf("SSSS\n");
+			}
+			fprintf(stderr, "Data: %s", buf);
+	
+			switch(buf[0]) {
+				case 'd':
+					/* deposit */
+					deposit(socket, players[index], get_value(buf));
+					break;
+				case 'w':
+					/* withdraw */
+					withdraw(socket, players[index], get_value(buf));
+					break;
+				case 'i':
+					/* info */
+					print_info(socket, players[index]);
+				case 'n':
+					/* next */
+					break;
+				case 'l':
+					/* last */
+					break;
+				case 'b':
+					/* bet */
+					bet(socket, players[index], buf, data->horses, data->horse_count, data->bank, data->bank_mutex);
+					break;
+				default:
+					if(bulk_write(socket, UNWN_CMD_MSG, strlen(UNWN_CMD_MSG)) < 0) {
+						ERR("write");
+					}
+					break;
+			}		
 
-		/* if(strcmp(buf, "deposit\n") == 0) {
+			/* if(strcmp(buf, "deposit\n") == 0) {
 			
 		} else if(strcmp(buf, "withdraw\n") == 0) {
 			
@@ -375,8 +405,36 @@ void* handle_connection(void* th_data) {
 			
 		} */
 		
-		memset(buf, 0, BUF_SIZE);
-	}
+			memset(buf, 0, BUF_SIZE);
+		} else {
+			printf("NOT Reading...\n");
+			while(*data->state != STATE_NOT_RACING) {
+				pthread_mutex_lock(data->mutex);
+				if(pthread_cond_wait(data->cond, data->mutex) != 0) {
+					ERR("pthread_cond_wait");
+				}
+				if(pthread_mutex_unlock(data->mutex) != 0) {
+					ERR("pthread_mutex_unlock");
+				}
+				for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
+					if((*data->curr_running_horses)[i]) {
+						snprintf(one_line_status, 256, "%s distance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
+	/*					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
+						strcat(race_status, one_line_status);
+					}
+				}
+				strcat(race_status, "\n");
+				if(bulk_write(socket, race_status, 256*8) < 0) {
+					ERR("write");
+				}
+				race_status[0]='\0';
+			}
+			if(players[index]->horse_bet && data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
+				players[index]->money += players[index]->money_bet * 2;
+				printf("SSSS\n");
+			}		
+		}/* if(FD_ISSET) */
+	} /* while */
 
 	fprintf(stderr, "Connection ended.\n");
 	free(th_data);
@@ -473,10 +531,15 @@ void* horse_thread(void* arg) {
 				if(pthread_mutex_unlock(data->mutex) != 0) {
 					ERR("pthread_mutex_unlock");
 				}
+				break;
 			}
 
 			fprintf(stderr, "Horse: %s\tDistance run: %d, Rest Factor: %f\n", data->name, data->distance_run, data->rest_factor);
 
+
+			if(pthread_mutex_lock(data->mutex) != 0) {
+				ERR("pthread_mutex_lock");
+			}
 			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
 				ERR("pthread_cond_wait");
 			}
@@ -494,7 +557,7 @@ void* server_accept_connections(void* arg) {
 	/*horse* horses = args->horses;*/
 	pthread_t id[MAX_HORSES_PER_RACE];
 	pthread_attr_t thattr;
-	player** players;
+	player** players = args->players;
 	player_th_data* thread_data;
 
 	if(pthread_attr_init(&thattr) != 0) {
@@ -502,11 +565,6 @@ void* server_accept_connections(void* arg) {
 	}
 	if(pthread_attr_setdetachstate(&thattr, PTHREAD_CREATE_DETACHED) != 0) {
 		ERR("pthread_attr_setdetachstate");
-	}
-
-	printf("socket: %d\n", socket);
-	if( (players = (player**) malloc(2 * sizeof(player*))) == NULL) {
-		ERR("malloc");
 	}
 
 	while(!exit_flag) {
@@ -524,20 +582,18 @@ void* server_accept_connections(void* arg) {
 		thread_data->state_cond = args->state_cond;
 		thread_data->cond = args->cond;
 		thread_data->mutex = args->mutex;
+		thread_data->bank_mutex = args->bank_mutex;
 		thread_data->state = args->state;
 		thread_data->horse_count = args->horse_count;
 		thread_data->horses = args->horses;
 		thread_data->curr_running_horses = args->curr_running_horses;
 		thread_data->winner = args->winner;
+		thread_data->players = args->players;
+		thread_data->bank = args->bank;
 		if(pthread_create(&id[i++], &thattr, handle_connection, (void*) thread_data) != 0) {
 			ERR("pthread_create");
 		}
 	}
-
-	for(i = 0; i < 2; ++i) {
-		free(players[i]);
-	}
-	free(players);
 
 	if(pthread_attr_destroy(&thattr) != 0) {
 		ERR("pthread_attr_destroy");
@@ -573,6 +629,7 @@ void read_configuration(horse** horses, horse** race_winner, int* horse_count, i
 	}
 
 	*frequency = atoi(buf + strlen("FREQUENCY:"));
+	*frequency = 3600 / *frequency;
 
 	/* Read horse count */
 	if(fgets(buf, LINE_BUF, file) == NULL) {
@@ -625,22 +682,31 @@ closed:
 
 void* server_handle_race(void* arg) {
 	race_args* args = (race_args*) arg;
-	int horse_count = args->horse_count, i, racing_horses, count = 0, index, in_running_index=0;
+	int horse_count = args->horse_count, i, racing_horses, count = 0, index, in_running_index=0, winners = 0, total_win_bet = 0;
+	double percent;
 	unsigned int seed = time(NULL);
 	horse* horses = args->horses;
+	int* bank = args->bank;
+	player** players = args->players;
 	/*pthread_mutex_t* mutex = args->mutex;(*/
 	pthread_cond_t* cond = args->cond;
 	
 	while(!exit_flag) {
 
+		if(pthread_mutex_lock(args->state_mutex) != 0) {
+			ERR("pthread_mutex_lock");
+		}
 		while(*args->state != STATE_RACING) {
+			printf("State: NOT_RACING\n");
 			if(pthread_cond_wait(args->state_cond, args->state_mutex) != 0) {
 				ERR("pthread_cond_wait");
 			}
-			if(pthread_mutex_unlock(args->state_mutex) != 0) {
-				ERR("pthread_mutex_unlock");
-			}
 		}
+		printf("State: RACING\n");
+		if(pthread_mutex_unlock(args->state_mutex) != 0) {
+			ERR("pthread_mutex_unlock");
+		}
+		printf("Here1\n");
 		
 		racing_horses = (MAX_HORSES_PER_RACE > horse_count) ? horse_count : MAX_HORSES_PER_RACE;
 
@@ -655,8 +721,10 @@ void* server_handle_race(void* arg) {
 			}
 		}
 
+		printf("here2\n");
 		while(!(*(args->winner)) && !exit_flag) {
 			sleep(1);
+			printf("here3\n");
 			if(pthread_cond_broadcast(cond) != 0) {
 				ERR("pthread_cond_broadcast");
 			}
@@ -664,7 +732,26 @@ void* server_handle_race(void* arg) {
 
 		for(i = 0; i < horse_count; ++i) {
 			horses[index].running = 0;
+			horses[index].distance_run = 0;
 		}
+
+		total_win_bet = 0;
+		for(i = 0; i < MAX_PLAYERS; ++i) {
+			if(players[i] && players[i]->horse_bet && !strcmp(players[i]->horse_bet->name, (*(args->winner))->name)) {
+				total_win_bet += players[i]->money_bet;
+			}
+		}
+	
+		for(i = 0; i < MAX_PLAYERS; ++i) {
+			if(players[i] && players[i]->horse_bet && !strcmp(players[i]->horse_bet->name, (*(args->winner))->name)) {
+				percent = ((double) players[i]->money_bet / (double) total_win_bet);
+				players[i]->money += percent * (*bank);
+
+				players[i]->horse_bet = NULL;
+				players[i]->money_bet = 0;
+			}
+		}
+		*bank = 0;
 
 		for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
 			(*args->curr_running_horses)[i] = NULL;
@@ -675,25 +762,27 @@ void* server_handle_race(void* arg) {
 		}
 		
 		*args->state = STATE_NOT_RACING;
-		pthread_cond_signal(args->state_cond);
-	
+		pthread_cond_broadcast(args->state_cond);
+
 		fprintf(stderr, "The Race has ended!\n");
+		(*(args->winner)) = NULL;
 	}
 	pthread_exit(NULL);
 }
 
 int main(int argc, char** argv) {
-	int socket, horse_count, frequency, state_value = STATE_RACING, i;
+	int socket, horse_count, frequency, state_value = STATE_NOT_RACING, i, bank = 0;
 	uint16_t port;
 	horse* horses;
 	horse* race_winner;
 	horse** curr_running;
+	player** players;
 	pthread_t tid[2];
-	pthread_mutex_t race_mutex, state_mutex;
+	pthread_mutex_t race_mutex, state_mutex, bank_mutex;
 	pthread_cond_t race_cond, state_cond;
 	acc_clients_args arguments1;
 	race_args race_arg;
-
+	
 	if(argc != 2) {
 		usage();
 		exit(EXIT_FAILURE);
@@ -706,6 +795,9 @@ int main(int argc, char** argv) {
 	if( (curr_running = (horse**) calloc(MAX_HORSES_PER_RACE, sizeof(horse*))) == NULL ) {
 		ERR("calloc");
 	}
+	if( (players = (player**) calloc(MAX_PLAYERS, sizeof(player*))) == NULL ) {
+		ERR("calloc");
+	}
 	for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
 		curr_running[i] = NULL;
 	}
@@ -714,6 +806,9 @@ int main(int argc, char** argv) {
 		ERR("pthread_mutex_init");
 	}
 	if(pthread_mutex_init(&state_mutex, NULL) != 0) {
+		ERR("pthread_mutex_init");
+	}
+	if(pthread_mutex_init(&bank_mutex, NULL) != 0) {
 		ERR("pthread_mutex_init");
 	}
 	if(pthread_cond_init(&race_cond, NULL) != 0) {
@@ -739,8 +834,11 @@ int main(int argc, char** argv) {
 	arguments1.state = &state_value;
 	arguments1.cond = &race_cond;
 	arguments1.mutex = &race_mutex;
+	arguments1.bank_mutex = &bank_mutex;
 	arguments1.curr_running_horses = &curr_running;
 	arguments1.winner = &race_winner;
+	arguments1.players = players;
+	arguments1.bank = &bank;
 	if(pthread_create(&tid[0], NULL, server_accept_connections, (void*) &arguments1) != 0) {
 		ERR("pthread_create");
 	}
@@ -751,12 +849,29 @@ int main(int argc, char** argv) {
 	race_arg.state_mutex = &state_mutex;
 	race_arg.state_cond = &state_cond;
 	race_arg.mutex = &race_mutex;
+	race_arg.bank_mutex = &bank_mutex;
 	race_arg.cond = &race_cond;
 	race_arg.state = &state_value;
 	race_arg.curr_running_horses = &curr_running;
+	race_arg.players = players;
+	race_arg.bank = &bank;
 	if( pthread_create(&tid[1], NULL, server_handle_race, (void*) &race_arg) != 0) {
 		ERR("pthread_create");
 	}
+
+	while(!exit_flag) {
+		printf("Frequency: %d.\n", frequency);
+		printf("Sleeping...\n");
+		sleep(frequency);
+		printf("Woke up!\n");
+		state_value = STATE_RACING;
+		pthread_cond_broadcast(&state_cond);
+		pthread_mutex_lock(&state_mutex);
+		while(state_value != STATE_NOT_RACING) {
+			pthread_cond_wait(&state_cond, &state_mutex);
+		}
+		pthread_mutex_unlock(&state_mutex);
+	} 
 	
 	if(pthread_join(tid[0], NULL) != 0) {
 		ERR("pthread_join");
@@ -776,12 +891,20 @@ int main(int argc, char** argv) {
 	if(pthread_mutex_destroy(&state_mutex) != 0) {
 		ERR("pthread_mutex_destroy");
 	}
+	if(pthread_mutex_destroy(&bank_mutex) != 0) {
+		ERR("pthread_mutex_destroy");
+	}
 	if(pthread_cond_destroy(&race_cond) != 0) {
 		ERR("pthread_cond_destroy");
 	}
 	if(pthread_cond_destroy(&state_cond) != 0) {
 		ERR("pthread_cond_destroy");
 	}
+	
+	for(i = 0; i < MAX_PLAYERS; ++i) {
+		free(players[i]);
+	}
+	free(players);
 
 	return EXIT_SUCCESS;
 }
