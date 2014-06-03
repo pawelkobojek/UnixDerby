@@ -56,7 +56,6 @@ typedef struct {
 	horse* horse_bet;
 	int money_bet;
 	int* bank;
-	pthread_mutex_t* bank_mutex;
 } player;
 
 typedef struct {
@@ -314,10 +313,6 @@ void* handle_connection(void* th_data) {
 		race_status[0]='\0';
 	}
 
-	if(players[index]->horse_bet && *data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
-		players[index]->money += players[index]->money_bet * 2;
-	}
-
 	FD_ZERO(&read_set);
 	FD_SET(socket, &read_set);
 	count = 1;
@@ -347,7 +342,6 @@ void* handle_connection(void* th_data) {
 				for(i = 0; i < MAX_HORSES_PER_RACE; ++i) {
 					if((*data->curr_running_horses)[i]) {
 						snprintf(one_line_status, 256, "%s distance: %d\n", (*data->curr_running_horses)[i]->name, (*data->curr_running_horses)[i]->distance_run);
-	/*					snprintf(one_line_status, 256, "%s distance: %d\n", data->horses[i].name, data->horses[i].distance_run); */
 						strcat(race_status, one_line_status);
 					}
 				}
@@ -357,12 +351,7 @@ void* handle_connection(void* th_data) {
 				}
 				race_status[0]='\0';
 			}
-			if(players[index]->horse_bet && *data->winner && !strcmp(players[index]->horse_bet->name, (*data->winner)->name)) {
-				players[index]->money += players[index]->money_bet * 2;
-				printf("SSSS\n");
-			}
-			fprintf(stderr, "Data: %s", buf);
-	
+
 			switch(buf[0]) {
 				case 'd':
 					/* deposit */
@@ -434,6 +423,8 @@ void* handle_connection(void* th_data) {
 				printf("SSSS\n");
 			}		
 		}/* if(FD_ISSET) */
+		FD_ZERO(&read_set);
+		FD_SET(socket, &read_set);
 	} /* while */
 
 	fprintf(stderr, "Connection ended.\n");
@@ -498,9 +489,11 @@ void* horse_thread(void* arg) {
 	horse_args* args = (horse_args*) arg;
 	horse* data = args->horse_data;
 	float distance;
+	time_t start, end, dif;
 	fprintf(stderr, "Horse: %s, running: %d\n", data->name, data->running);
 	
 	while(!exit_flag) {
+		start = time(NULL);
 		if(pthread_mutex_lock(data->mutex) != 0) {
 			ERR("pthread_mutex_lock");
 		}
@@ -508,12 +501,18 @@ void* horse_thread(void* arg) {
 			if(pthread_cond_wait(data->cond, data->mutex) != 0) {
 				ERR("pthread_cond_wait");
 			}
-			fprintf(stderr, "Horse: %s awaken!\n", data->name);
 		}
 		if(pthread_mutex_unlock(data->mutex) != 0) {
 			ERR("pthread_mutex_unlock");
 		}
 		
+		end = time(NULL);
+		
+		dif = end - start;
+
+		data->rest_factor += dif * 0.05;
+		data->rest_factor = (data->rest_factor > 1) ? 1 : data->rest_factor;
+	
 		while(data->running) {
 			distance = data->rest_factor * MAX_HORSE_SPEED + (rand() % 5);
 			data->distance_run += distance;
@@ -526,16 +525,16 @@ void* horse_thread(void* arg) {
 				}
 				if(!(*args->winner)) {
 					*args->winner = data;
-					fprintf(stderr, "Horse: %s ended\n", data->name);
+					fprintf(stderr, "Horse: %s won!\n", data->name);
 				}
 				if(pthread_mutex_unlock(data->mutex) != 0) {
 					ERR("pthread_mutex_unlock");
 				}
+				data->distance_run = 0;
 				break;
 			}
 
 			fprintf(stderr, "Horse: %s\tDistance run: %d, Rest Factor: %f\n", data->name, data->distance_run, data->rest_factor);
-
 
 			if(pthread_mutex_lock(data->mutex) != 0) {
 				ERR("pthread_mutex_lock");
@@ -682,7 +681,7 @@ closed:
 
 void* server_handle_race(void* arg) {
 	race_args* args = (race_args*) arg;
-	int horse_count = args->horse_count, i, racing_horses, count = 0, index, in_running_index=0, winners = 0, total_win_bet = 0;
+	int horse_count = args->horse_count, i, racing_horses, count = 0, index, in_running_index=0, total_win_bet = 0;
 	double percent;
 	unsigned int seed = time(NULL);
 	horse* horses = args->horses;
