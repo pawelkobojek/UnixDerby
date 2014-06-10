@@ -54,38 +54,38 @@ typedef struct {
 } horse;
 
 typedef struct {
-	char name[MAX_NAME_LEN];
-	int money;
-	horse* horse_bet;
-	int money_bet;
-	int* bank;
+	char name[MAX_NAME_LEN];	/* Player's name */
+	int money;			/* Player's deposited money */
+	horse* horse_bet;		/* Pointer to betted horse */
+	int money_bet;			/* Money betted on horse */
+	int* bank;			/* Pointer to bank */
 } player;
 
 typedef struct {
-	horse* horse_data;
-	horse** winner;
+	horse* horse_data;		/* Horse owned by thread */
+	horse** winner;			/* Pointer to winner of the race */
 } horse_args;
 
 typedef struct {
-	player** players;
-	int socket;
-	int* state;
-	int* bank;
-	int horse_count;
-	time_t* time;
-	int* interval;
-	horse* horses;
-	pthread_mutex_t* state_mutex;
-	pthread_mutex_t* mutex;
-	pthread_mutex_t* bank_mutex;
-	pthread_cond_t* state_cond;
-	pthread_cond_t* cond;
-	horse*** curr_running_horses;
-	horse** winner;
+	player** players;		/* Array of all players */
+	int socket;			/* Socket of player's connection */
+	int* state;			/* Indicates state of the server (either accepting bets or handling the race */
+	int* bank;			/* Pointer to bank */
+	int horse_count;		/* Number of all horses */
+	time_t* time;			/* Time of interval between races start */
+	int* interval;			/* Interval of time between races */
+	horse* horses;			/* Array of all horses */
+	pthread_mutex_t* state_mutex;	/* Mutex used in state changes */
+	pthread_mutex_t* mutex;		/* Pointer to mutex used to simulate race turns */
+	pthread_mutex_t* bank_mutex;	/* Mutex for bank access */
+	pthread_cond_t* state_cond;	/* Conditional variable used to signal state changes */
+	pthread_cond_t* cond;		/* Conditional variable used to signal race turns */
+	horse*** curr_running_horses;	/* Pointer to array of horses running in current/upcoming race */
+	horse** winner;			/* Pointer to winner of the race */
 } player_th_data;
 
 typedef struct {
-	int socket;
+	int socket;			/* Socket 
 	horse* horses;
 	int horse_count;
 	int* state;
